@@ -61,9 +61,9 @@ static void bmjpu_setup_logging(void)
         level = BM_JPU_LOG_LEVEL_ERROR;
         break;
     case AV_LOG_WARNING:
+    case AV_LOG_INFO:
         level = BM_JPU_LOG_LEVEL_WARNING;
         break;
-    case AV_LOG_INFO:
     case AV_LOG_VERBOSE:
         level = BM_JPU_LOG_LEVEL_INFO;
         break;
