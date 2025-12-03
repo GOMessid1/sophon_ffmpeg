@@ -1174,6 +1174,7 @@ static int bm_videoenc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
         ctx->src_fb = get_src_framebuffer(avctx);
         if (ctx->src_fb == NULL) {
             av_log(avctx, AV_LOG_ERROR, "get_src_framebuffer failed\n");
+            av_frame_free(&pic);
             av_packet_unref(avpkt);
             return AVERROR_UNKNOWN;
         }
@@ -1193,6 +1194,7 @@ static int bm_videoenc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
                 av_log(avctx, AV_LOG_ERROR,
                        "For now, video encoder does NOT support compressed frame data!\n"
                        "Please use scale_bm to decompresse the data to uncompressed data first!\n");
+                av_frame_free(&pic);
                 return AVERROR_EXTERNAL;
             }
 
@@ -1211,10 +1213,12 @@ static int bm_videoenc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
             for (i=0; i<((sw_format==AV_PIX_FMT_YUV420P)?3:2); i++) {
                 if (pic->data[i] == NULL) {
                     av_log(avctx, AV_LOG_ERROR, "ERROR! Invalid pic data[%d](%p)!\n", i, pic->data[i]);
+                    av_frame_free(&pic);
                     return AVERROR_EXTERNAL;
                 }
                 if (pic->linesize[i] <= 0) {
                     av_log(avctx, AV_LOG_ERROR, "ERROR! Invalid pic linesize[%d](%d]!\n", i, pic->linesize[i]);
+                    av_frame_free(&pic);
                     return AVERROR_EXTERNAL;
                 }
             }
@@ -1255,12 +1259,14 @@ static int bm_videoenc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
             if (pic->data[0] == NULL || pic->data[1] == NULL ||
                 (pic->format == AV_PIX_FMT_YUV420P && pic->data[2] == NULL)) {
                 av_log(avctx, AV_LOG_ERROR, "ERROR! Invalid pic data!\n");
+                av_frame_free(&pic);
                 return AVERROR(EINVAL);;
             }
 
             if (pic->linesize[0] <= 0 || pic->linesize[1] <= 0 ||
                 (pic->format == AV_PIX_FMT_YUV420P && pic->linesize[2] <= 0)) {
                 av_log(avctx, AV_LOG_ERROR, "ERROR! Invalid pic line size!\n");
+                av_frame_free(&pic);
                 return AVERROR(EINVAL);;
             }
 
@@ -1269,12 +1275,14 @@ static int bm_videoenc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
             addr = (uint8_t*)bmvpu_enc_dma_buffer_get_physical_address(ctx->src_fb->dma_buffer);
             if (addr == NULL) {
                 av_log(avctx, AV_LOG_ERROR, "bmvpu_enc_dma_buffer_get_physical_address failed\n");
+                av_frame_free(&pic);
                 return AVERROR_EXTERNAL;
             }
 #else
             ret = bmvpu_dma_buffer_map(ctx->core_idx, ctx->src_fb->dma_buffer, BM_VPU_ENC_MAPPING_FLAG_READ|BM_VPU_ENC_MAPPING_FLAG_WRITE);
             if (ret != BM_SUCCESS) {
                 av_log(avctx, AV_LOG_ERROR, "bmvpu_dma_buffer_map failed\n");
+                av_frame_free(&pic);
                 return AVERROR_EXTERNAL;
             }
             addr = (uint8_t *)(ctx->src_fb->dma_buffer->virt_addr);
@@ -1310,6 +1318,7 @@ static int bm_videoenc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
                                       width, height);
                 if (ret < 0) {
                     av_log(avctx, AV_LOG_ERROR, "bm_image_upload failed\n");
+                    av_frame_free(&pic);
                     return AVERROR_EXTERNAL;
                 }
 #else
@@ -1336,12 +1345,14 @@ static int bm_videoenc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
             if (pic->data[4] == NULL || pic->data[5] == NULL ||
                 (pic->format == AV_PIX_FMT_YUV420P && pic->data[6] == NULL)) {
                 av_log(avctx, AV_LOG_ERROR, "ERROR! Invalid pic data!\n");
+                av_frame_free(&pic);
                 return AVERROR_EXTERNAL;
             }
 
             if (pic->linesize[4] <= 0 || pic->linesize[5] <= 0 ||
                 (pic->format == AV_PIX_FMT_YUV420P && pic->linesize[6] <= 0)) {
                 av_log(avctx, AV_LOG_ERROR, "ERROR! Invalid pic line size!\n");
+                av_frame_free(&pic);
                 return AVERROR_EXTERNAL;
             }
 

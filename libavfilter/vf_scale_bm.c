@@ -253,6 +253,7 @@ typedef struct BmScaleContext {
     int is_bmvpp_inited;
     int zero_copy;
     int stride_align;
+    pthread_rwlock_t list_rwlock;
     struct list_head freed_avbuffer_list;
     struct list_head module_entry;
 
@@ -445,7 +446,9 @@ static void bmscale_avbuffer_recycle(void *ctx, uint8_t *data)
 
     //recycle it, not really free.
     if (found) {
+        pthread_rwlock_wrlock(&avbuffer_ctx->ctx->list_rwlock);
         list_add(&avbuffer_ctx->entry, &avbuffer_ctx->ctx->freed_avbuffer_list);
+        pthread_rwlock_unlock(&avbuffer_ctx->ctx->list_rwlock);
     }else{
         avbuffer_ctx->ctx = NULL;
         bmscale_avbuffer_release(avbuffer_ctx);
@@ -483,16 +486,20 @@ static struct bmscale_avbuffer_ctx_s* bmscale_buffer_pool_alloc(BmScaleContext *
     int total_buffer_size = 0;
     bm_handle_t handle;
 
+    pthread_rwlock_rdlock(&ctx->list_rwlock);
     list_for_each_entry(hwpic, &ctx->freed_avbuffer_list, entry, struct bmscale_avbuffer_ctx_s) {
         if (hwpic->format == format && hwpic->width == width && hwpic->height == height) {
             found = 1;
             break;
         }
     }
+    pthread_rwlock_unlock(&ctx->list_rwlock);
 
     if (found) {
         // detach from free chain list.
+        pthread_rwlock_wrlock(&ctx->list_rwlock);
         list_del(&hwpic->entry);
+        pthread_rwlock_unlock(&ctx->list_rwlock);
         return hwpic;
     }
 
@@ -663,6 +670,7 @@ static int bmscale_init(AVFilterContext *ctx)
 
     s->is_bmvpp_inited = 0;
     list_init(&s->freed_avbuffer_list);
+    pthread_rwlock_init(&s->list_rwlock, NULL);
     // qsort(g_convert_table, FF_ARRAY_ELEMS(g_convert_table), sizeof(g_convert_table[0]), bmscale_csc_table_key_compare);
 
     list_init(&s->module_entry);
@@ -714,10 +722,13 @@ static void bmscale_uninit(AVFilterContext *ctx)
 
     {
         struct bmscale_avbuffer_ctx_s *pos, *n;
+        pthread_rwlock_wrlock(&s->list_rwlock);
         list_for_each_entry_safe(pos, n, &s->freed_avbuffer_list, entry, struct bmscale_avbuffer_ctx_s) {
             bmscale_avbuffer_release(pos);
         }
+        pthread_rwlock_unlock(&s->list_rwlock);
     }
+    pthread_rwlock_destroy(&s->list_rwlock);
 
     av_frame_free(&s->frame);
     av_frame_free(&s->tmp_frame);

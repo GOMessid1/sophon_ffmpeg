@@ -685,6 +685,8 @@ static int select_frame_type(AVCodecContext *avctx, BMVidFrame* bmframe)
             pict_type = AV_PICTURE_TYPE_I;
             break;
         case BM_PIC_TYPE_P            : /* P picture */
+            pict_type = AV_PICTURE_TYPE_P;
+            break;
         case BM_PIC_TYPE_B            : /* B picture (except VC1) */
             pict_type = AV_PICTURE_TYPE_B;
             break;
@@ -745,6 +747,10 @@ static int bm_fill_frame(AVCodecContext *avctx, BMVidFrame* bmframe, AVFrame* fr
     }
 
     frame->pict_type = select_frame_type(avctx, bmframe);
+    if(frame->pict_type == AV_PICTURE_TYPE_I)
+        frame->key_frame  = 1;
+    else
+        frame->key_frame  = 0;
     frame->width  = avctx->width;
     frame->height = avctx->height;
     frame->format = avctx->pix_fmt;

@@ -9,7 +9,7 @@
 #include "framesync.h"
 #include "bmcv_api_ext_c.h"
 #include "bmlib_runtime.h"
-
+#include <stdatomic.h>
 
 #define MAIN    0
 #define OVERLAY 1
@@ -52,6 +52,8 @@ static const char *const var_names[] = {
 typedef struct buffer_t {
     bm_image* img;
     uint8_t* host_mem;
+    atomic_int* frame_count;
+    bm_handle_t handle;
 } buffer_t;
 
 typedef struct OverlayBmContext {
@@ -72,6 +74,8 @@ typedef struct OverlayBmContext {
     double var_values[VAR_VARS_NB];
     char *x_expr, *y_expr;
     AVExpr *x_pexpr, *y_pexpr;
+
+    atomic_int frame_count;
 } OverlayBmContext;
 
 static const enum AVPixelFormat supported_in_formats[] = {
@@ -271,6 +275,12 @@ static void buffer_free(void *opaque, uint8_t *data)
         buffer->img =NULL;
     }
 
+    if(atomic_fetch_sub(buffer->frame_count, 1) == 0){
+        bm_dev_free(buffer->handle);
+        buffer->handle = NULL;
+        buffer->frame_count = NULL;
+    }
+
     free(buffer);
     buffer = NULL;
 
@@ -374,20 +384,21 @@ static int overlay_bm_query_formats(AVFilterContext *ctx)
                 return ret;
             }
         }
-        if ((ret = ff_formats_ref(formats, &ctx->inputs[0]->out_formats)) < 0)
+        if ((ret = ff_formats_ref(formats, &ctx->inputs[0]->out_formats)) < 0 ||
+            (ret = ff_formats_ref(formats, &ctx->outputs[0]->in_formats)) < 0)
             return ret;
     }
-    if (ctx->outputs[0]) {
+    if (ctx->inputs[1]) {
         const AVPixFmtDescriptor *desc = NULL;
         formats = NULL;
         while ((desc = av_pix_fmt_desc_next(desc))) {
             pix_fmt = av_pix_fmt_desc_get_id(desc);
-            if ((output_format_is_supported(pix_fmt))
+            if ((input_format_is_supported(pix_fmt))
                 && (ret = ff_add_format(&formats, pix_fmt)) < 0) {
                 return ret;
             }
         }
-        if ((ret = ff_formats_ref(formats, &ctx->outputs[0]->in_formats)) < 0)
+        if ((ret = ff_formats_ref(formats, &ctx->inputs[1]->out_formats)) < 0)
             return ret;
     }
 
@@ -397,7 +408,7 @@ static int overlay_bm_query_formats(AVFilterContext *ctx)
 
 }
 
-static int av_frame_convert(bm_handle_t handle, AVFrame *src, AVFrame **dst)
+static int av_frame_convert(OverlayBmContext *ctx, AVFrame *src, AVFrame **dst)
 {
     int i;
     int plane_size[3] = {0};
@@ -430,6 +441,8 @@ static int av_frame_convert(bm_handle_t handle, AVFrame *src, AVFrame **dst)
     convert_frame->channels = src->channels;
     av_frame_copy_props(convert_frame, src);
 
+    bufs->handle = ctx->handle;
+    bufs->frame_count = &ctx->frame_count;
     bufs->host_mem = (uint8_t*)av_malloc(plane_size[0] + plane_size[1] + plane_size[2]);
 
     for(i=0; i<3; i++) {
@@ -450,15 +463,17 @@ static int av_frame_convert(bm_handle_t handle, AVFrame *src, AVFrame **dst)
         }
     }
 
-    bm_image_create(handle, convert_frame->height, convert_frame->width,
+    bm_image_create(ctx->handle, convert_frame->height, convert_frame->width,
                     image_format, DATA_TYPE_EXT_1N_BYTE, convert_image, stride);
     bm_image_alloc_dev_mem_heap_mask(*convert_image, 4);
+
+    atomic_fetch_add(bufs->frame_count, 1);
 
     // upload or convert
     if(!src->data[4]) {
         bm_image_copy_host_to_device(*convert_image, (void**)src->data);
     } else {
-        bm_image_create (handle, src->height, src->width, FORMAT_COMPRESSED, DATA_TYPE_EXT_1N_BYTE, &compressed_image, NULL);
+        bm_image_create (ctx->handle, src->height, src->width, FORMAT_COMPRESSED, DATA_TYPE_EXT_1N_BYTE, &compressed_image, NULL);
 
         input_addr[0] = bm_mem_from_device((unsigned long long)src->data[6], src->height * src->linesize[4]);
         input_addr[1] = bm_mem_from_device((unsigned long long)src->data[4], (src->height / 2) * src->linesize[5]);
@@ -467,7 +482,7 @@ static int av_frame_convert(bm_handle_t handle, AVFrame *src, AVFrame **dst)
         bm_image_attach(compressed_image, input_addr);
 
         bmcv_rect_t crop_rect = {0, 0, src->width, src->height};
-        bmcv_image_vpp_convert(handle, 1, compressed_image, convert_image, &crop_rect, BMCV_INTER_LINEAR);
+        bmcv_image_vpp_convert(ctx->handle, 1, compressed_image, convert_image, &crop_rect, BMCV_INTER_LINEAR);
         bm_image_destroy(compressed_image);
     }
 
@@ -504,7 +519,7 @@ static int ff_framesync_bm_get_frame(FFFrameSync *fs, unsigned in, AVFrame **rfr
     ori_frame = fs->in[in].frame;
 
     if(!avctx->hw_device_ctx) {
-        av_frame_convert(ctx->handle, ori_frame, &convert_frame);
+        av_frame_convert(ctx, ori_frame, &convert_frame);
         if(convert_frame) {
             av_frame_free(&ori_frame);
             ori_frame = fs->in[in].frame = convert_frame;
@@ -520,11 +535,36 @@ static int ff_framesync_bm_get_frame(FFFrameSync *fs, unsigned in, AVFrame **rfr
         if (need_copy) {
             if (!(clone_frame = av_frame_clone(ori_frame)))
                 return AVERROR(ENOMEM);
-            // TODO
-            if (!avctx->hw_device_ctx && (ret = av_frame_make_writable(clone_frame)) < 0) {
-                av_frame_free(&clone_frame);
-                return ret;
+
+            // frame extra data copy
+            for(i=4; i<8; i++)
+            {
+                clone_frame->data[i] = ori_frame->data[i];
+                clone_frame->linesize[i] = ori_frame->linesize[i];
             }
+
+            if (!avctx->hw_device_ctx) {
+                if (!((clone_frame->channel_layout == 101 &&
+                    clone_frame->data[4] &&
+                    clone_frame->data[5] &&
+                    clone_frame->data[6] &&
+                    clone_frame->data[7]) ||
+                    (clone_frame->channel_layout != 101 &&
+                    clone_frame->format == FORMAT_YUV420P &&
+                    clone_frame->data[4] &&
+                    clone_frame->data[5] &&
+                    clone_frame->data[6]) ||
+                    (clone_frame->channel_layout != 101 &&
+                    clone_frame->format != FORMAT_YUV420P &&
+                    clone_frame->data[4] &&
+                    clone_frame->data[5]))) {
+                    if ((ret = av_frame_make_writable(clone_frame)) < 0) {
+                        av_frame_free(&clone_frame);
+                        return ret;
+                    }
+                }
+            }
+
             /**
              * when activate func is called, filter will free fs->in[in].frame,
              * so clone_frame can make sure that the lifecycle of origin frame will be
@@ -568,6 +608,7 @@ static int bm_overlay_filtering(OverlayBmContext *ctx, AVFrame* input_main, AVFr
     bm_image input_main_img, input_overlay_img;
     bm_device_mem_t mem[3] = {0};
     bmcv_rect_t src_crop_rect, dst_crop_rect;
+    bmcv_padding_atrr_t padding_attr;
 
     if(ctx->hw_device_ctx) {
         ret = hwavframe_to_bm_image(ctx->handle, *input_main, &input_main_img);
@@ -587,18 +628,21 @@ static int bm_overlay_filtering(OverlayBmContext *ctx, AVFrame* input_main, AVFr
             goto end;
     }
 
-
     src_crop_rect.start_x = 0;
     src_crop_rect.start_y = 0;
     src_crop_rect.crop_w = input_overlay->width;
     src_crop_rect.crop_h = input_overlay->height;
 
-    dst_crop_rect.start_x = ctx->x_position;
-    dst_crop_rect.start_y = ctx->y_position;
-    dst_crop_rect.crop_w = input_overlay->width;
-    dst_crop_rect.crop_h = input_overlay->height;
+    padding_attr.dst_crop_stx = ctx->x_position;
+    padding_attr.dst_crop_sty = ctx->y_position;
+    padding_attr.dst_crop_w = input_overlay->width;
+    padding_attr.dst_crop_h = input_overlay->height;
+    padding_attr.padding_b = 0;
+    padding_attr.padding_g = 0;
+    padding_attr.padding_r = 0;
+    padding_attr.if_memset = 0;
 
-    ret = bmcv_image_vpp_stitch(ctx->handle, 1, &input_overlay_img, input_main_img, &dst_crop_rect, &src_crop_rect, BMCV_INTER_LINEAR);
+    ret = bmcv_image_vpp_convert_padding(ctx->handle, 1, input_overlay_img, &input_main_img, &padding_attr, &src_crop_rect, BMCV_INTER_LINEAR);
     if(ret != 0)
         goto end;
 
@@ -750,6 +794,7 @@ static av_cold int overlay_bm_init(AVFilterContext *avctx)
     OverlayBmContext* ctx = avctx->priv;
     bm_dev_request(&ctx->handle, ctx->sophon_idx);
     ctx->fs.on_event = &overlay_bm_blend;
+    ctx->frame_count = ATOMIC_VAR_INIT(0);
 
     return 0;
 }
@@ -761,7 +806,9 @@ static av_cold void overlay_bm_uninit(AVFilterContext *avctx)
 {
     OverlayBmContext* ctx = avctx->priv;
 
-    bm_dev_free(ctx->handle);
+    if(atomic_load(&ctx->frame_count) == 0)
+        bm_dev_free(ctx->handle);
+
     ff_framesync_uninit(&ctx->fs);
 
     av_expr_free(ctx->x_pexpr); ctx->x_pexpr = NULL;

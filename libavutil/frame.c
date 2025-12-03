@@ -762,12 +762,6 @@ static int frame_copy_video(AVFrame *dst, const AVFrame *src)
                   src_data, src->linesize,
                   dst->format, src->width, src->height);
 
-    for(i=4; i<8; i++)
-    {
-        dst->data[i] = src->data[i];
-        dst->linesize[i] = src->linesize[i];
-    }
-
     return 0;
 }
 
