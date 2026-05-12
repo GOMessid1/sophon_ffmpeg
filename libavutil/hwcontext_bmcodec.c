@@ -580,7 +580,7 @@ static int bm_image_download(AVHWFramesContext *ctx, int soc_idx,
 
         size = src_linesize * h;
         src_mem = bm_mem_from_device(src, size);
-        bm_memcpy_d2s_partial(hwctx->handle, dst,src_mem, size);
+        ret = bm_memcpy_d2s_partial(hwctx->handle, dst,src_mem, size);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "bmvpu_upload_data failed\n");
             return -1;
@@ -632,7 +632,7 @@ static int bm_image_upload(AVHWFramesContext *ctx,int soc_idx,
 
         size = src_linesize * h;
         dst_mem = bm_mem_from_device(dst, size);
-        bm_memcpy_s2d_partial(hwctx->handle, dst_mem , src, size);
+        ret = bm_memcpy_s2d_partial(hwctx->handle, dst_mem , src, size);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "bmvpu_upload_data failed\n");
             return -1;

@@ -1446,6 +1446,9 @@ static int bm_videoenc_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
     if (enc_ret == BM_VPU_ENC_RETURN_CODE_END) {
         av_log(avctx, AV_LOG_DEBUG, "encoding end!\n");
         ctx->is_end = true;
+    } else if (enc_ret == BM_VPU_ENC_RETURN_CODE_INVALID_PARAMS) {
+        av_packet_unref(avpkt);
+        return AVERROR(EINVAL);
     } else if (enc_ret != BM_VPU_ENC_RETURN_CODE_OK) {
         av_log(avctx, AV_LOG_ERROR, "could not encode this image : %s\n",
                bmvpu_enc_error_string(enc_ret));

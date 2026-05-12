@@ -489,6 +489,7 @@ static av_cold int bm_decode_init(AVCodecContext *avctx)
     param.skip_mode = (BmVpuDecSkipMode)bmctx->skip_non_idr;
     param.perf = bmctx->perf;
     param.core_idx = bmctx->core_idx;
+    param.decode_order = bmctx->decode_order;
 
     ret = bmvpu_dec_create(&handle, param);
     if (ret != 0) {
@@ -503,7 +504,8 @@ static av_cold int bm_decode_init(AVCodecContext *avctx)
     bmctx->pkg_num_inbuf = 0;
     bmctx->first_frame = 0;
     bmctx->pkt_flag = 0;
-    bmctx->getfirstframe_flag = 0;
+    bmctx->dts_offset = 0;
+    bmctx->last_pts = 0;
 
     bm_handle_buffer = (BMHandleBuffer*)av_mallocz(sizeof(BMHandleBuffer));
     ff_mutex_init(&(bm_handle_buffer->av_mutex), NULL);
@@ -1006,6 +1008,7 @@ FF_DISABLE_DEPRECATION_WARNINGS
 FF_ENABLE_DEPRECATION_WARNINGS
 #endif
     frame->pkt_dts = bmframe->dts;
+    av_log(avctx, AV_LOG_DEBUG, "%s frame->pts:%d frame->pkt_dts:%d\n", __func__, frame->pts, frame->pkt_dts);
 
     if (bmctx->perf)
         bmctx->total_frame++;
@@ -1336,11 +1339,13 @@ static int bm_decode_internal(AVCodecContext *avctx, void *outdata, int *outdata
     BMDecContext* bmctx = (BMDecContext*)(avctx->priv_data);
     BMVidCodHandle handle = bmctx->handle;
     int ret = 0;
+    int send_ret = 0;
     BMVidFrame* bmframe= (BMVidFrame *)malloc(sizeof(BMVidFrame));
     AVFrame *frame = (AVFrame *)outdata;
     BMVidStream stream;
     BMDecStatus status;
     int timeout_cnt = 0;
+    int buf_cnt = 0;
 #ifdef BM_PCIE_MODE
     uint32_t align = 4;
     uint8_t *data_buf = NULL,*header_buf = NULL;
@@ -1401,20 +1406,24 @@ static int bm_decode_internal(AVCodecContext *avctx, void *outdata, int *outdata
                 stream.extradata_size = 0;
                 stream.pts = avpkt->pts;
                 stream.dts = avpkt->dts;
+                av_log(avctx, AV_LOG_DEBUG, "%s stream.pts:%d stream.dts:%d\n", __func__, stream.pts, stream.dts);
 
-                ret = bmvpu_dec_decode(handle, stream);
-                if (ret == BM_SUCCESS) {
+                send_ret = bmvpu_dec_decode(handle, stream);
+                if (send_ret == BM_SUCCESS) {
+                    if(bmctx->pkg_num_inbuf > 0)
+                        bmctx->dts_offset = stream.dts - bmctx->last_dts;
+                    bmctx->last_dts = stream.dts;
                     // sent_pkg_flag = 1;
                     bmctx->pkg_num_inbuf += 1;
                     bmctx->pkt_flag = 0;
-                    ret = avpkt->size;
+                    send_ret = avpkt->size;
 #if 0
                     av_log(avctx, AV_LOG_INFO,"pkg num: %d, empty size: %d, pkt size: %d, pts: %ld, dts: %ld\n",
                            bmctx->pkg_num_inbuf, bmvpu_dec_get_all_empty_input_buf_cnt(handle), stream.length, avpkt->pts, avpkt->dts);
 #endif
                 } else {
-                    if(ret > 0)
-                        ret = 0;
+                    if(send_ret > 0)
+                        send_ret = 0;
                     av_log(avctx, AV_LOG_ERROR, "please check. pkt can't be sent to decoder, pkt_size:%d, ret=%d!!!\n", avpkt->size, ret);
                 }
 
@@ -1438,12 +1447,12 @@ static int bm_decode_internal(AVCodecContext *avctx, void *outdata, int *outdata
             }
         }
     }
-    if(ret < 0) {
+    if(send_ret < 0) {
         free(bmframe);
-        if(ret == BM_ERR_VDEC_ERR_HUNG) {
+        if(send_ret == BM_ERR_VDEC_ERR_HUNG) {
             ret = AVERROR_EXTERNAL;
         }
-        else if(ret == BM_ERR_VDEC_NOMEM) {
+        else if(send_ret == BM_ERR_VDEC_NOMEM) {
             ret = AVERROR(ENOMEM);
         }
         return ret;
@@ -1462,7 +1471,8 @@ static int bm_decode_internal(AVCodecContext *avctx, void *outdata, int *outdata
 
     while ((ret = bmvpu_dec_get_output(handle, bmframe)) != BM_SUCCESS &&
            (status=bmvpu_dec_get_status(handle)) < BMDEC_STOP &&
-           (/*bmctx->getfirstframe_flag ||*/ bmctx->endof_flag > 0 || bmvpu_dec_get_pkt_in_buf_cnt(handle) > MAX_FRAME_IN_BUFFER)) {
+           (bmctx->endof_flag > 0 || (buf_cnt = bmvpu_dec_get_pkt_in_buf_cnt(handle)) > MAX_FRAME_IN_BUFFER ||
+           (bmctx->decode_order == 1 && send_ret > 0))) {
         timeout_cnt++;
         if(timeout_cnt % 30000 == 0){
             av_log(avctx, AV_LOG_ERROR, "bmvpu_dec_get_output timeout. dec_status:%d endof_flag=%d pkg:%d\n", bmvpu_dec_get_status(handle), bmctx->endof_flag, bmvpu_dec_get_pkt_in_buf_cnt(handle));
@@ -1471,6 +1481,12 @@ static int bm_decode_internal(AVCodecContext *avctx, void *outdata, int *outdata
         if(status == BMDEC_FRAMEBUFFER_NOTENOUGH)
             break;
         av_usleep(USLEEP_CLOCK);
+    }
+
+    if (ret != BM_SUCCESS && buf_cnt == 0) {
+        memset(bmframe, 0, sizeof(BMVidFrame));
+        av_usleep(2*USLEEP_CLOCK);
+        ret = bmvpu_dec_get_output(handle, bmframe);
     }
 
     if(ret != BM_SUCCESS) {
@@ -1494,7 +1510,11 @@ static int bm_decode_internal(AVCodecContext *avctx, void *outdata, int *outdata
         }
     }
 
-    bmctx->getfirstframe_flag = 1;
+    if(avpkt->pts == AV_NOPTS_VALUE && bmframe->pts == AV_NOPTS_VALUE) {
+        bmframe->pts = bmctx->last_pts + bmctx->dts_offset;
+        bmctx->last_pts = bmframe->pts;
+    }
+
     if(bmctx->first_frame == 0 && avctx->skip_frame == AVDISCARD_ALL) {
         *outdata_size = 0;
         bmctx->first_frame = 1;
@@ -1702,7 +1722,9 @@ static const AVOption options[] = {
     { "core_idx", "Specify a decoding core in a soc to decode. 1684 max = 3, 1684x max = 1",
         OFFSET(core_idx), AV_OPT_TYPE_INT, {.i64 = -1}, -1, 3, FLAGS },
     {"size_input_buffer","input buffer size of video decoder bitstream (0x200000, 0x700000)",
-        OFFSET(size_input_buffer),AV_OPT_TYPE_INT,{.i64=0x400000} ,0X200000,0X700000,FLAGS },
+        OFFSET(size_input_buffer), AV_OPT_TYPE_INT, {.i64=0x400000} , 0X200000, 0X700000, FLAGS },
+    {"decode_order","set decoder display order: 0: display order, 1: decode order",
+        OFFSET(decode_order), AV_OPT_TYPE_INT, {.i64=0}, 0, 1, FLAGS },
     { NULL},
 };
 

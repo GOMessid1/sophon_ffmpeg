@@ -98,11 +98,14 @@ static av_cold int bm_jpegenc_init(AVCodecContext *avctx)
 #if defined(BM1684)
     AVBmCodecDeviceContext *bmcodec_device_hwctx = NULL;
 #endif
-    int raw_size = avctx->width * avctx->height * 3/2;
-    /* assume the min compression ratio is 2 */
-    int min_ratio = 2;
-    int bs_buffer_size;
+    int mcuw;
+    int mcuh;
+    int chromasf;
     int sw_pix_fmt;
+    int64_t aligned_width;
+    int64_t aligned_height;
+    int64_t bs_buffer_size64;
+    int bs_buffer_size;
     int ret;
 
     ctx->hw_accel = 0;
@@ -135,28 +138,60 @@ static av_cold int bm_jpegenc_init(AVCodecContext *avctx)
     if (ctx->hw_accel)
         av_log(avctx, AV_LOG_INFO, "sw_pix_fmt = %s\n", av_get_pix_fmt_name(avctx->sw_pix_fmt));
 
-    /* The size for YUV 420/422/444 */
-    if (ctx->hw_accel)
-        sw_pix_fmt = avctx->sw_pix_fmt;
-    else
-        sw_pix_fmt = avctx->pix_fmt;
+    sw_pix_fmt = ctx->hw_accel ? avctx->sw_pix_fmt : avctx->pix_fmt;
+    switch (sw_pix_fmt) {
+    case AV_PIX_FMT_YUV420P:
+    case AV_PIX_FMT_YUVJ420P:
+    case AV_PIX_FMT_NV12:
+    case AV_PIX_FMT_NV21:
+        mcuw = 16;
+        mcuh = 16;
+        chromasf = 1;
+        break;
+    case AV_PIX_FMT_YUV422P:
+    case AV_PIX_FMT_YUVJ422P:
+    case AV_PIX_FMT_NV16:
+        mcuw = 16;
+        mcuh = 8;
+        chromasf = 2;
+        break;
+    case AV_PIX_FMT_GRAY8:
+        mcuw = 8;
+        mcuh = 8;
+        chromasf = 0;
+        break;
+    case AV_PIX_FMT_YUV444P:
+    case AV_PIX_FMT_YUVJ444P:
+    default:
+        mcuw = 8;
+        mcuh = 8;
+        chromasf = 4;
+        break;
+    }
 
-    if (sw_pix_fmt == AV_PIX_FMT_YUV420P || sw_pix_fmt == AV_PIX_FMT_YUVJ420P ||
-        sw_pix_fmt == AV_PIX_FMT_NV12 || sw_pix_fmt == AV_PIX_FMT_NV21)
-        raw_size = avctx->width * avctx->height * 3/2;
-    else if (sw_pix_fmt == AV_PIX_FMT_YUV422P || sw_pix_fmt == AV_PIX_FMT_YUVJ422P ||
-        sw_pix_fmt == AV_PIX_FMT_NV16)
-        raw_size = avctx->width * avctx->height * 2;
-    else if (sw_pix_fmt == AV_PIX_FMT_YUV444P || sw_pix_fmt == AV_PIX_FMT_YUVJ444P)
-        raw_size = avctx->width * avctx->height * 3;
-    else /* if (sw_pix_fmt == AV_PIX_FMT_GRAY8) */
-        raw_size = avctx->width * avctx->height;
+    /*
+     * libjpeg-turbo tjBufSize()-style formula:
+     *   size = PAD(width, mcuw) * PAD(height, mcuh) * (2 + chromasf) + 2048
+     */
+    aligned_width  = ((int64_t)avctx->width  + mcuw - 1) / mcuw * mcuw;
+    aligned_height = ((int64_t)avctx->height + mcuh - 1) / mcuh * mcuh;
+    bs_buffer_size64 = aligned_width * aligned_height * (2 + chromasf) + 2048;
 
-    if(ctx->quality >= 95)
-        min_ratio = 1;
+    if (bs_buffer_size64 <= 0 || bs_buffer_size64 > INT_MAX) {
+        av_log(avctx, AV_LOG_ERROR,
+               "invalid bs_buffer_size=%lld from tjBufSize-style formula\n",
+               (long long)bs_buffer_size64);
+        return AVERROR(EINVAL);
+    }
+
+    av_log(avctx, AV_LOG_DEBUG,
+           "bs formula: sw_pix_fmt=%s mcuw=%d mcuh=%d chromasf=%d aligned_w=%lld aligned_h=%lld size=%lld\n",
+           av_get_pix_fmt_name(sw_pix_fmt), mcuw, mcuh, chromasf,
+           (long long)aligned_width, (long long)aligned_height,
+           (long long)bs_buffer_size64);
 
 #define BS_MASK (1024*16-1)
-    bs_buffer_size = raw_size/min_ratio;
+    bs_buffer_size = (int)bs_buffer_size64;
     /* bitstream buffer size in unit of 16k */
     bs_buffer_size = (bs_buffer_size+BS_MASK)&(~BS_MASK);
     if (bs_buffer_size >= 16*1023*1024)
