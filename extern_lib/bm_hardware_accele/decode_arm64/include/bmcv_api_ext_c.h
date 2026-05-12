@@ -275,43 +275,43 @@ typedef struct yolov7_info{
 
 typedef struct
 {
-	//! Coordinates of the detected interest point
-	float x, y;
-	//! Detected scale
-	float scale;
-	//! Orientation measured anti-clockwise from +ve x-axis
-	float orientation;
-	//! Sign of laplacian for fast matching purposes
-	unsigned char laplacian;
-	//! Array of descriptor components
-	float descriptor[64]; //float descriptor[128];
-	float dx, dy;
-	//! Used to store cluster index
-	int clusterIndex;
+    //! Coordinates of the detected interest point
+    float x, y;
+    //! Detected scale
+    float scale;
+    //! Orientation measured anti-clockwise from +ve x-axis
+    float orientation;
+    //! Sign of laplacian for fast matching purposes
+    unsigned char laplacian;
+    //! Array of descriptor components
+    float descriptor[64]; //float descriptor[128];
+    float dx, dy;
+    //! Used to store cluster index
+    int clusterIndex;
 } Ipoint;
 
 typedef struct
 {
-	int width;
-	int	height;
-	int	step;
-	int	filter;
-	float *responses;
-	unsigned char *laplacian;
+    int width;
+    int    height;
+    int    step;
+    int    filter;
+    float *responses;
+    unsigned char *laplacian;
 } ResponseLayer;
 
 typedef struct
 {
-	float *img;
-	int i_width;
-	int i_height;
-	Ipoint *ipts;
-	int iptssize;
-	ResponseLayer responseMap[12];
-	int octaves;
-	int init_sample;
-	float thresh;
-	int interestPtsLen;
+    float *img;
+    int i_width;
+    int i_height;
+    Ipoint *ipts;
+    int iptssize;
+    ResponseLayer responseMap[12];
+    int octaves;
+    int init_sample;
+    float thresh;
+    int interestPtsLen;
 } FastHessian;
 
 typedef struct
@@ -450,6 +450,11 @@ typedef enum {
     BM_MORPH_CROSS,
     BM_MORPH_ELLIPSE
 } bmcv_morph_shape_t;
+
+typedef struct _mask_info {
+    int mask_val;
+    float rgb[3];
+} mask_info_t;
 
 DECL_EXPORT const char *bm_get_bmcv_version();
 
@@ -847,6 +852,29 @@ DECL_EXPORT bm_status_t bmcv_image_warp_affine_padding(
         bm_image *               input,
         bm_image *               output,
         int                      use_bilinear);
+
+DECL_EXPORT bm_status_t bmcv_image_warp_affine_padding_rgb(
+        bm_handle_t handle,
+        int image_num,
+        bmcv_affine_image_matrix matrix[4],
+        bm_image *input,
+        bm_image *output,
+        int padding_r,
+        int padding_g,
+        int padding_b,
+        int use_bilinear);
+
+DECL_EXPORT bm_status_t bmcv_image_warp_affine_similar_to_opencv_padding_rgb(
+        bm_handle_t handle,
+        int image_num,
+        bmcv_affine_image_matrix matrix[4],
+        bm_image *input,
+        bm_image *output,
+        int padding_r,
+        int padding_g,
+        int padding_b,
+        int use_bilinear);
+
 /**
  * Image affine transformation can realize rotation, translation, scaling and other operations
  * image_num is image num;matrix is transformation matrix data structure corresponding to each image
@@ -1263,6 +1291,21 @@ DECL_EXPORT bm_status_t bmcv_faiss_indexflatIP(
         int             input_dtype,
         int             output_dtype);
 
+//bmcv_faiss_indexflatIP_u64 can request more than 4GB of device memory
+DECL_EXPORT bm_status_t bmcv_faiss_indexflatIP_u64(
+        bm_handle_t         handle,
+        bm_device_mem_u64_t input_data_global_addr,
+        bm_device_mem_u64_t db_data_global_addr,
+        bm_device_mem_u64_t buffer_global_addr,
+        bm_device_mem_u64_t output_sorted_similarity_global_addr,
+        bm_device_mem_u64_t output_sorted_index_global_addr,
+        int                 vec_dims,
+        int                 query_vecs_num,
+        int                 database_vecs_num,
+        int                 sort_cnt,
+        int                 is_transpose,
+        int                 input_dtype,
+        int                 output_dtype);
 /**
  * @brief: calculate squared L2 distance between query vectors and database vectors, output the top K L2sqr-values and the corresponding indices, return BM_SUCCESS if succeed.
  * @param handle                               [in]: the device handle.
@@ -2497,6 +2540,57 @@ DECL_EXPORT bm_status_t bmcv_matrix_log(
   bm_handle_t handle,
   bm_image src,
   bm_image dst);
+
+/**
+ * Count the number of non-zero elements in the input matrix and store their indices
+ * input_addr is input matrix data address
+ * nonzero_idx_addr is output indices address of non-zero elements
+ * width is input matrix width
+ * height is input matrix height
+ * channel is input matrix channel count
+ * nonzero_count is output pointer to store the total number of non-zero elements
+ */
+DECL_EXPORT bm_status_t bmcv_count_nonzero (bm_handle_t handle,
+                                bm_device_mem_t input_addr,
+                                bm_device_mem_t nonzero_idx_addr,
+                                int width,
+                                int height,
+                                int channel,
+                                int* nonzero_count);
+
+DECL_EXPORT bm_status_t bmcv_add_mask_to_image(
+    bm_handle_t  handle,
+    bm_image     mask,
+    bm_image     image,
+    int          num_mask,
+    mask_info_t *mask_config);
+
+/**
+ * @brief Calculate the SSIM (Structural Similarity Index) of two images on TPU
+ * @param handle BM device handle
+ * @param win_size Window size (must be odd)
+ * @param gradient Whether to compute gradient (unused)
+ * @param data_range Pixel value range (e.g., 255.0)
+ * @param gaussian_weights Whether to use Gaussian weights
+ * @param full Whether to output the full difference map
+ * @param bm_im1 Image 1
+ * @param bm_im2 Image 2
+ * @param diff_map_tpu Output difference map (optional, caller is responsible for release)
+ * @param mssim_tpu Output average SSIM value
+ * @return BM_SUCCESS on success, other error codes on failure
+ */
+DECL_EXPORT bm_status_t bmcv_image_ssim(
+    bm_handle_t handle,
+    int win_size,
+    // bool gradient,
+    float data_range,
+    bool gaussian_weights,
+    bool full,
+    bm_image bm_im1,
+    bm_image bm_im2,
+    float** diff_map_tpu,
+    float* mssim_tpu
+);
 
 /**
  * The data in the address requested by bm_image is cleared before use
